@@ -1,2 +1,2 @@
 # public-mini-projects
-Follow my journey as I learn python and post mini projects :-)
+Follow my journey as I learn python by doing fun mini projects :-)
