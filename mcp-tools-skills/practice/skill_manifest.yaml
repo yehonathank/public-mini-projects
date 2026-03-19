@@ -1,0 +1,24 @@
+# Skill manifest — routing only. The model sees this (plus a tiny router prompt) before any SOP.
+# Detailed procedures live in skills/<sop_file>.
+
+skills:
+  - id: personal_context_manager
+    name: Personal Context Manager
+    description: >
+      Persists and retrieves facts the user has directly stated, via MCP memory tools
+      and scratchpad.json.
+    trigger_criteria: >
+      The user explicitly states a verifiable fact about themselves: identity, role, employer,
+      field of work, location, living situation, stable preferences, past life events,
+      moves or relocations (e.g. "I moved to [place]"), places they have lived or visited
+      in relation to themselves, or dates/years tied to their own experience (e.g. "in 2022",
+      "last year I ..." about themselves).
+      Does NOT match: greetings, small talk, questions to the assistant, hypotheticals,
+      third-party facts, jokes, or requests that do not include a self-statement.
+    sop_file: skills/personal_context_sop.md
+    required_tools:
+      - store
+      - recall
+      - recall_item
+      - list_keys
+      - delete

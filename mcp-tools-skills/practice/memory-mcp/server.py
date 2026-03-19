@@ -41,11 +41,47 @@ def _format_value(val: Any) -> str:
     return str(val)
 
 
+def _store_validation_error(key: str, value: Any) -> str | None:
+    """
+    Reject useless writes: empty key, or value that carries no information.
+    Key = stable category (taxonomy); value = the specific fact — never {} with fact in key name only.
+    """
+    if key is None or not str(key).strip():
+        return (
+            "Error: 'key' must be a non-empty category name (e.g. academic_field, geographic_location). "
+            "Do not use a full sentence as the key."
+        )
+    if isinstance(value, str) and not value.strip():
+        return (
+            "Error: 'value' is empty. The key names the category; put the user's actual fact in 'value'. "
+            "Example: store(key='academic_field', value='mathematics'). Do not use value='' or '{}'."
+        )
+    if isinstance(value, dict) and len(value) == 0:
+        return (
+            "Error: refuse to store an empty object {} as value. "
+            "Put the specific fact in 'value' and use a generic taxonomy key (e.g. academic_field), "
+            "not a key like studies_mathematics with an empty value."
+        )
+    if isinstance(value, list) and len(value) == 0:
+        return (
+            "Error: refuse to store an empty list []. Use a non-empty string or list of items the user stated."
+        )
+    return None
+
+
 @mcp.tool()
 def store(key: str, value: str | list[str] | dict[str, Any]) -> str:
-    """Save a key-value pair to the long-term scratchpad. Value can be a string, a list (e.g. ['A','B','C']), or a dict. Use this to remember facts, variable names, column choices, or any state the agent needs to recall later."""
+    """Persist one user fact: key = category (taxonomy bucket), value = the specific fact they said.
+
+    Rules: (1) Key is a short snake_case category such as academic_field, geographic_location,
+    current_role — not a compressed sentence. (2) Value must hold the information (string, non-empty
+    list, or non-empty dict).     Never use an empty string or empty dict as value to mean "the key says it all";
+    that is invalid and will be rejected."""
+    err = _store_validation_error(key, value)
+    if err:
+        return err
     data = _load_scratchpad()
-    data[key] = value
+    data[str(key).strip()] = value
     _save_scratchpad(data)
     return f"Stored: {key} = {_format_value(value)}"
 
