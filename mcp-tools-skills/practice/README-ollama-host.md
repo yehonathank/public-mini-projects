@@ -87,13 +87,14 @@ Use the same interpreter that has `mcp` installed — the host spawns `memory-mc
 
 ## What you should see
 
-- `[Host] Connected to Memory MCP. Tools: ...`
-- `[Host] Manifest: .../skill_manifest.yaml` (and model line)
-- **Phase 1:** `MODEL · router · decision` shows **only** parsed **YES** or **NO**. Then **`ROUTER · interpretability`**: **Decision**, **Why** (rationale), and **Model raw** (full router reply for audit).
-- **Phase 2–3 (if YES):** `··· Ollama round N ···`, **TOOLS** / **MODEL** sections as before
-- **Phase NO:** one **MODEL · assistant** block (casual chat, no tools)
+With **`QUIET_UI = True`** (default):
 
-Example: *I moved to Tucson in 2022* → router **YES** with a short **Why** citing personal location/date → then `store` under **TOOLS**.
+- **Stdout:** only `\nYou:` prompts and `\nAssistant:\n...` (no `<thinking>` in the assistant text).
+- **Stderr:** banner, `[Host] …` lines, **MODEL** / **ROUTER** / **TOOLS** / ReAct rounds (full router raw, including any `<thinking>` there). Tip: `python ollama_host.py 2>/dev/null` if you want *only* the chat on stdout.
+
+With **`QUIET_UI = False`:** the same sections print on **stdout**; host/bootstrap lines still use **stderr** so startup stays separated from the transcript a little.
+
+Example: *I moved to Tucson in 2022* → router **YES** → then `store` under **TOOLS** (on stderr if quiet).
 
 ## Troubleshooting
 
@@ -109,6 +110,20 @@ Example: *I moved to Tucson in 2022* → router **YES** with a short **Why** cit
 | MCP import error                                    | Activate venv and `pip install -r requirements-ollama-host.txt`                                                                                                 |
 | Wrong Python for MCP server                         | Run `ollama_host.py` with the same `python` that can `import mcp`                                                                                               |
 
+
+## Introspection: `<thinking>` traces & quiet UI
+
+In `ollama_host.py` (top-level constants):
+
+| Constant | Purpose |
+|----------|---------|
+| **`QUIET_UI`** | **`True` (default):** stdout is only **`You:`** / **`Assistant:`** (thinking stripped). **MODEL** / **TOOLS** / **ROUTER** / ReAct rounds go to **stderr** so you can `2>debug.log` or ignore them. **`False`:** those sections print on **stdout** (still **no** `<thinking>` inside MODEL boxes — stripped for display; full trace in JSONL). |
+| **`TRACE_LOG_PATH`** | Default `practice/host_history/history_log.jsonl` — **one JSON object per user turn** (query, hydrated context, thinking blocks, tool trace, final reply raw/stripped). Set to **`None`** to disable. |
+| **`INTROSPECTION_COT_RULES`** | Appended to the casual system prompt and to the executor (SOP + tools) so the model is nudged to emit `<thinking>...</thinking>` before acting. The host **keeps** full text in API history; **printed** assistant text **never** shows `<thinking>` (trace files keep raw + extracted blocks). |
+
+After you exit the REPL (EOF, `quit`, or Ctrl+C), the host also writes **`host_history/history_log.json`** — a single JSON file with `{ "turns": [ ... ] }` for the whole session.
+
+The **`host_history/`** directory is gitignored (JSONL + snapshot stay out of the repo).
 
 ## Options
 

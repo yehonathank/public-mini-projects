@@ -8,3 +8,10 @@ __pycache__/
 *.pyw
 *.pyz
 *.pywz
+
+# Agent introspection traces (ollama_host → host_history/)
+mcp-tools-skills/practice/host_history/
+mcp-tools-skills/practice/eval_runs/
+
+# Local secrets (e.g. OPENAI_API_KEY for eval_runner --provider openai)
+mcp-tools-skills/practice/.env

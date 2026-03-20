@@ -6,8 +6,14 @@ The agent can persist facts across conversation turns.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+# Avoid printing "Processing request of type ListToolsRequest" (and similar) on stdio when
+# spawned as a subprocess by ollama_host.py — that noise pollutes the user's terminal.
+logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
+logging.getLogger("mcp").setLevel(logging.WARNING)
 
 from mcp.server.fastmcp import FastMCP
 
