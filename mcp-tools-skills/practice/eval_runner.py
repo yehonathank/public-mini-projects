@@ -54,52 +54,6 @@ SCRATCHPAD_PATH = PRACTICE_DIR / "memory-mcp" / "scratchpad.json"
 EVAL_RUNS_DIR = PRACTICE_DIR / "eval_runs"
 
 
-async def _openai_connection_preflight(api_key: str, base_url: str | None) -> str | None:
-    """
-    One cheap API round-trip so a bad key fails before 30 eval trials.
-    Returns an error message, or None if OK.
-    """
-    try:
-        from openai import AsyncOpenAI
-    except ImportError as e:
-        return f"openai package not installed ({e}); pip install openai"
-    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-    try:
-        await client.models.list()
-    except Exception as e:
-        return f"OpenAI API check failed: {e!s}"
-    return None
-
-
-def _sanitize_api_key(raw: str | None) -> str:
-    """Strip whitespace, BOM, CR, and optional surrounding quotes from a secret value."""
-    if not raw:
-        return ""
-    s = raw.strip().replace("\r", "").replace("\ufeff", "")
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
-        s = s[1:-1].strip()
-    return s
-
-
-def _load_dotenv_file(path: Path | None, *, override: bool = True) -> None:
-    """Populate os.environ from a .env file. By default file values override the shell."""
-    if path is None:
-        return
-    p = path if path.is_absolute() else (PRACTICE_DIR / path)
-    if not p.is_file():
-        return
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        print(
-            f"[eval_runner] {p} exists but python-dotenv is not installed; "
-            "run: pip install python-dotenv",
-            file=sys.stderr,
-        )
-        return
-    load_dotenv(p, override=override)
-
-
 def clear_scratchpad() -> None:
     """Reset MCP on-disk memory so each case starts isolated."""
     try:
@@ -1039,12 +993,12 @@ async def run_eval(
 
     prov = (provider or "ollama").strip().lower()
     if prov == "openai":
-        key = _sanitize_api_key(os.environ.get("OPENAI_API_KEY"))
+        key = oh.sanitize_api_key(os.environ.get("OPENAI_API_KEY"))
         if not key:
             print("Error: OPENAI_API_KEY is required for --provider openai", file=sys.stderr)
             return 1
         base_early = (openai_base_url or os.environ.get("OPENAI_BASE_URL") or "").strip() or None
-        pre = await _openai_connection_preflight(key, base_early)
+        pre = await oh.openai_connection_preflight(key, base_early)
         if pre:
             print(pre, file=sys.stderr)
             low = pre.lower()
@@ -1113,7 +1067,7 @@ async def run_eval(
 
                 base = (openai_base_url or os.environ.get("OPENAI_BASE_URL") or "").strip() or None
                 client = OpenAIChatAdapter(
-                    api_key=_sanitize_api_key(os.environ.get("OPENAI_API_KEY")),
+                    api_key=oh.sanitize_api_key(os.environ.get("OPENAI_API_KEY")),
                     base_url=base,
                 )
             else:
@@ -1365,7 +1319,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     if not args.no_env_file:
-        _load_dotenv_file(Path(args.env_file), override=not args.preserve_shell_env)
+        oh.load_dotenv_file(Path(args.env_file), override=not args.preserve_shell_env)
     prov = args.provider.strip().lower()
     if args.model is None:
         model = "gpt-5.4" if prov == "openai" else "llama3.2"

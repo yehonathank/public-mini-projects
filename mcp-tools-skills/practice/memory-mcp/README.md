@@ -26,6 +26,26 @@ kill -9 $(lsof -t -i :6274) 2>/dev/null
 npx -y @modelcontextprotocol/inspector ./venv/bin/python server.py
 ```
 
+**Inspector vs. chat:** The Inspector is for **manually** calling tools and watching MCP requests and responses in the browser. It is not a conversational LLM.
+
+## Talk to an agent (conversation + tools)
+
+### Ollama host (terminal)
+
+From the parent `practice/` directory, `ollama_host.py` runs a local **Ollama** model with this Memory MCP server over stdio (tool loop: model → host → MCP → scratchpad). Full setup (Ollama, `llama3.2` or another tool-capable model, venv, `requirements-ollama-host.txt`) is in [../README-ollama-host.md](../README-ollama-host.md).
+
+```bash
+cd mcp-tools-skills/practice
+source venv/bin/activate
+python ollama_host.py
+```
+
+Optional: `python ollama_host.py --model llama3.1` (use a model that supports tools in Ollama; plain `llama3` does not).
+
+### Cursor or another MCP client
+
+Register this server in the client’s MCP settings: run `server.py` with this folder’s venv Python, **stdio** transport. Then use **Agent** or **Composer** chat so the assistant can call `store`, `recall`, and the other tools during the conversation.
+
 ## Tools
 
 | Tool | Purpose |

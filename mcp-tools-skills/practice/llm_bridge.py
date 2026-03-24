@@ -8,6 +8,7 @@ existing host error handling stays valid.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,6 +25,31 @@ else:
     _OPENAI_IMPORT_ERROR = None
 
 
+def _tool_calls_with_string_arguments(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Chat Completions API expects each tool call's function.arguments as a JSON string.
+    The host keeps dict arguments for Ollama compatibility; stringify here for OpenAI.
+    """
+    normalized: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        entry = dict(tc)
+        fn = entry.get("function")
+        if isinstance(fn, dict):
+            fn = dict(fn)
+            raw = fn.get("arguments")
+            if isinstance(raw, dict):
+                fn["arguments"] = json.dumps(raw, ensure_ascii=False)
+            elif raw is None:
+                fn["arguments"] = "{}"
+            elif not isinstance(raw, str):
+                fn["arguments"] = json.dumps(raw, ensure_ascii=False)
+            entry["function"] = fn
+        normalized.append(entry)
+    return normalized
+
+
 def _openai_assistant_dict(msg: dict[str, Any]) -> dict[str, Any]:
     role = msg.get("role")
     if role != "assistant":
@@ -32,7 +58,12 @@ def _openai_assistant_dict(msg: dict[str, Any]) -> dict[str, Any]:
     tcs = msg.get("tool_calls")
     c = msg.get("content")
     if tcs:
-        out["tool_calls"] = tcs
+        if isinstance(tcs, list):
+            out["tool_calls"] = _tool_calls_with_string_arguments(
+                [x for x in tcs if isinstance(x, dict)]
+            )
+        else:
+            out["tool_calls"] = tcs
         cs = (c or "").strip()
         out["content"] = cs if cs else None
     else:

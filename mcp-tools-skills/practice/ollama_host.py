@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Local Agent Host — Ollama + Memory MCP with dynamic skill hydration.
+Local Agent Host — LLM + Memory MCP with dynamic skill hydration.
 
 Phase 1: Router sees only skill_manifest.yaml (no SOP) → YES/NO.
 Phase 2–3: If YES, loads skills/<sop>.md into system prompt and runs tools (ReAct).
@@ -14,6 +14,10 @@ Usage:
   pip install -r requirements-ollama-host.txt
   ollama pull llama3.2
   python ollama_host.py
+
+  # OpenAI (Chat Completions API — same loop as Ollama; requires OPENAI_API_KEY)
+  export OPENAI_API_KEY=sk-...
+  python ollama_host.py --provider openai --model gpt-4o
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 import uuid
@@ -122,6 +127,9 @@ EXEC_TOOL_RULES = """
 
 - Use **native tool / function calling** only. Never paste fake tool JSON in message text.
 - After tools complete, answer in plain natural language.
+- If **recall** / **recall_item** reports a key missing but the user stated a storable fact, you **must**
+  call **store** in this turn before claiming anything was saved — never say you stored without a
+  successful **store** result.
 - For **store**, use real JSON arrays for list values in arguments when appropriate.
 - **store** must have a non-empty **value** (not `""`, not `{}`, not `[]`). The host and MCP server
   reject empty values; fix **category vs fact** per the SOP and call again.
@@ -131,6 +139,7 @@ EXEC_TOOL_RULES_WITH_COT = EXEC_TOOL_RULES.strip() + "\n\n" + INTROSPECTION_COT_
 
 # Plain "llama3" does not support tools in Ollama. llama3.2 / llama3.1 / qwen2.5 / mistral do.
 DEFAULT_MODEL = "llama3.2"
+DEFAULT_OPENAI_MODEL = "gpt-4o"
 MAX_TOOL_ROUNDS = 16
 # Terminal width for section headers (model vs tools)
 _OUT_W = 64
@@ -147,6 +156,52 @@ TOOL_MODEL_HINT = """
          python ollama_host.py --model llama3.2
        Other options: llama3.1, qwen2.5, mistral, gemma3 (see ollama.com search).
 """
+
+
+def sanitize_api_key(raw: str | None) -> str:
+    """Strip whitespace, BOM, CR, and optional surrounding quotes from a secret value."""
+    if not raw:
+        return ""
+    s = raw.strip().replace("\r", "").replace("\ufeff", "")
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    return s
+
+
+def load_dotenv_file(path: Path | None, *, override: bool = True) -> None:
+    """Populate os.environ from a .env file (optional; needs python-dotenv)."""
+    if path is None:
+        return
+    p = path if path.is_absolute() else (PRACTICE_DIR / path)
+    if not p.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        print(
+            f"[Host] {p} exists but python-dotenv is not installed; "
+            "run: pip install python-dotenv",
+            file=sys.stderr,
+        )
+        return
+    load_dotenv(p, override=override)
+
+
+async def openai_connection_preflight(api_key: str, base_url: str | None) -> str | None:
+    """
+    One cheap API round-trip so a bad key fails before the chat loop.
+    Returns an error message, or None if OK.
+    """
+    try:
+        from openai import AsyncOpenAI
+    except ImportError as e:
+        return f"openai package not installed ({e}); pip install openai"
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    try:
+        await client.models.list()
+    except Exception as e:
+        return f"OpenAI API check failed: {e!s}"
+    return None
 
 
 def load_manifest_raw() -> str:
@@ -454,9 +509,9 @@ def _host_chatter(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def print_banner() -> None:
+def print_banner(*, backend_line: str) -> None:
     print("=" * 60, file=sys.stderr)
-    print("  Ollama + Memory MCP — type 'quit' or 'exit' to stop", file=sys.stderr)
+    print(f"  {backend_line} + Memory MCP — type 'quit' or 'exit' to stop", file=sys.stderr)
     print(
         f"  QUIET_UI={'True' if QUIET_UI else 'False'} → "
         f"{'chat on stdout; sections on stderr' if QUIET_UI else 'sections on stdout'}",
@@ -665,16 +720,14 @@ async def run_tool_execution_loop(
             for tc in tool_calls:
                 fn = tc.function
                 cid = getattr(tc, "id", None) or str(uuid.uuid4())
-                raw_args = fn.arguments
-                if isinstance(raw_args, str):
-                    args_str = raw_args
-                else:
-                    args_str = json.dumps(raw_args, ensure_ascii=False)
+                # Ollama's pydantic Message model requires function.arguments as a dict,
+                # not a JSON string — round 2+ would fail in client.chat() validation.
+                args_dict = normalize_tool_arguments(fn.arguments)
                 tool_calls_out.append(
                     {
                         "id": cid,
                         "type": "function",
-                        "function": {"name": fn.name, "arguments": args_str},
+                        "function": {"name": fn.name, "arguments": args_dict},
                     }
                 )
             asst_content = content if content.strip() else ""
@@ -757,7 +810,7 @@ async def run_tool_execution_loop(
                         "type": "function",
                         "function": {
                             "name": tname,
-                            "arguments": json.dumps(tdict, ensure_ascii=False),
+                            "arguments": tdict,
                         },
                     }
                 )
@@ -995,6 +1048,9 @@ async def run_chat_loop(
     ollama_tools: list[dict],
     mcp_tool_names: set[str],
     model: str,
+    client: Any,
+    *,
+    banner_backend: str = "Ollama (local)",
 ) -> None:
     manifest = load_manifest()
     validate_manifest_against_mcp(manifest, mcp_tool_names)
@@ -1007,11 +1063,10 @@ async def run_chat_loop(
     if not primary_id:
         raise ValueError("Primary skill missing 'id' in manifest.")
 
-    client = AsyncClient()
     history: list[dict[str, Any]] = []
     session_trace: list[dict[str, Any]] = []
 
-    print_banner()
+    print_banner(backend_line=banner_backend)
     print(f"[Host] Manifest: {MANIFEST_PATH}", file=sys.stderr)
     print(f"[Host] Router skill id: {primary_id!r}", file=sys.stderr)
     if TRACE_LOG_PATH:
@@ -1059,10 +1114,39 @@ async def run_chat_loop(
             print(f"[Host] Could not write {snapshot_path}: {e}", file=sys.stderr)
 
 
-async def async_main(model: str) -> int:
+async def async_main(
+    model: str,
+    *,
+    provider: str = "ollama",
+    openai_base_url: str | None = None,
+) -> int:
     if not MEMORY_SERVER.exists():
         print(f"Error: Memory MCP server not found at {MEMORY_SERVER}", file=sys.stderr)
         return 1
+
+    prov = (provider or "ollama").strip().lower()
+    openai_key = ""
+    openai_base: str | None = None
+    if prov == "openai":
+        openai_key = sanitize_api_key(os.environ.get("OPENAI_API_KEY"))
+        if not openai_key:
+            print(
+                "Error: OPENAI_API_KEY is required for --provider openai "
+                "(export it or add it to practice/.env).",
+                file=sys.stderr,
+            )
+            return 1
+        openai_base = (openai_base_url or os.environ.get("OPENAI_BASE_URL") or "").strip() or None
+        pre = await openai_connection_preflight(openai_key, openai_base)
+        if pre:
+            print(pre, file=sys.stderr)
+            low = pre.lower()
+            if "401" in pre or "invalid_api_key" in low or "incorrect api key" in low:
+                print(
+                    "→ Create or rotate a key at https://platform.openai.com/account/api-keys",
+                    file=sys.stderr,
+                )
+            return 1
 
     server_params = StdioServerParameters(
         command=sys.executable,
@@ -1083,30 +1167,94 @@ async def async_main(model: str) -> int:
                 file=sys.stderr,
             )
             print(
-                f"[Host] Model: {model} | Manifest: {MANIFEST_PATH}",
+                f"[Host] Provider: {prov} | Model: {model} | Manifest: {MANIFEST_PATH}",
                 file=sys.stderr,
             )
 
+            if prov == "openai":
+                from llm_bridge import OpenAIChatAdapter
+
+                client: Any = OpenAIChatAdapter(api_key=openai_key, base_url=openai_base)
+                banner_backend = "OpenAI"
+            else:
+                client = AsyncClient()
+                banner_backend = "Ollama (local)"
+
             try:
-                await run_chat_loop(session, ollama_tools, known_names, model)
+                await run_chat_loop(
+                    session,
+                    ollama_tools,
+                    known_names,
+                    model,
+                    client,
+                    banner_backend=banner_backend,
+                )
             except ModelDoesNotSupportToolsError:
-                print(TOOL_MODEL_HINT.strip(), file=sys.stderr)
-                return 1
+                if prov == "ollama":
+                    print(TOOL_MODEL_HINT.strip(), file=sys.stderr)
+                    return 1
+                raise
 
     return 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ollama host: manifest router + hydrated SOP + Memory MCP",
+        description="Agent host: manifest router + hydrated SOP + Memory MCP (Ollama or OpenAI).",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=("ollama", "openai"),
+        default="ollama",
+        help="LLM backend (default: ollama). OpenAI uses Chat Completions + OPENAI_API_KEY.",
+    )
+    parser.add_argument(
+        "--openai-base-url",
+        default=None,
+        help="Optional OpenAI-compatible API base URL (default: official OpenAI). "
+        "Also reads OPENAI_BASE_URL from the environment.",
     )
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help=f"Ollama model name (default: {DEFAULT_MODEL})",
+        default=None,
+        help=(
+            "Model id for the provider "
+            f"(default: {DEFAULT_MODEL} for ollama, {DEFAULT_OPENAI_MODEL} for openai)."
+        ),
+    )
+    parser.add_argument(
+        "--env-file",
+        default=".env",
+        help="Load environment variables from this file under practice/ (default: .env). Ignored with --no-env-file.",
+    )
+    parser.add_argument(
+        "--no-env-file",
+        action="store_true",
+        help="Do not load a .env file.",
+    )
+    parser.add_argument(
+        "--preserve-shell-env",
+        action="store_true",
+        help="With .env loading, do not override variables already set in the shell.",
     )
     args = parser.parse_args()
-    code = asyncio.run(async_main(args.model))
+    if not args.no_env_file:
+        load_dotenv_file(
+            Path(args.env_file),
+            override=not args.preserve_shell_env,
+        )
+    prov = args.provider.strip().lower()
+    if args.model is None:
+        model = DEFAULT_OPENAI_MODEL if prov == "openai" else DEFAULT_MODEL
+    else:
+        model = args.model
+    code = asyncio.run(
+        async_main(
+            model,
+            provider=prov,
+            openai_base_url=args.openai_base_url,
+        )
+    )
     raise SystemExit(code)
 
 
