@@ -1,6 +1,7 @@
-# State: LRQ_Step_2
-
-# Question: "Have you noticed any changes in your bowel habits, like significant constipation, diarrhea, or recent weight loss?"
+---
+kind: question
+patient: "Have you noticed any changes in your bowel habits, like significant constipation, diarrhea, or recent weight loss?"
+---
 
 # Logic:
 - IF response contains (**constipation** OR **bloated** OR **previous left side pain** OR **left-sided pain**): GOTO node_id **Diverticulitis_Result**

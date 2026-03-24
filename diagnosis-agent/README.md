@@ -50,9 +50,12 @@ Flow: **chief complaint** → `Patient: …` → protocol questions at `You:` on
 
 Offline check (no API key): `python test_router_logic.py` validates GOTO parsing.
 
+**Interpretability log:** each run wipes `history/` and writes `history/history.md` — chief complaint, each screen the host shows, each patient reply, the full LLM context (system + structured user fields + node file), tool JSON, and resolved next node. The folder is gitignored.
+
 ## Clinical state machine (`nodes/` + `router.py`)
 
 - **Nodes:** one Markdown file per state: `nodes/<node_id>.md` (e.g. `skills`, `LRQ_Step_1`).
+- **Front matter (required):** YAML-style block at the top — `kind: question` or `kind: result`, and `patient: "…"` (the line printed as `Question:` / `Result:`). Below that, `# Logic:` and `GOTO node_id **NextNode**` lines define allowed branches.
 - **Loader:** `router.py` reads a node by id (safe basename only).
 
 ```bash

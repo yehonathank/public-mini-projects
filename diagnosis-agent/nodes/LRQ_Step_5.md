@@ -1,6 +1,7 @@
-# State: LRQ_Step_5
-
-# Question: "Does the pain feel like a localized sharp point where you can't feel it anywhere else, or is it a broader pelvic ache?"
+---
+kind: question
+patient: "Does the pain feel like a localized sharp point where you can't feel it anywhere else, or is it a broader pelvic ache?"
+---
 
 # Logic:
 - IF response contains (**localized** OR **one spot** OR **sharp point** OR **feel fine otherwise**): GOTO node_id **Appendagitis_Result**

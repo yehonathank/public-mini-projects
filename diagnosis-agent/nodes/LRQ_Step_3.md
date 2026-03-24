@@ -1,6 +1,7 @@
-# State: LRQ_Step_3
-
-# Question: "Did the pain start after a specific physical event, like heavy lifting, or have you recently been sick with a cold or sore throat?"
+---
+kind: question
+patient: "Did the pain start after a specific physical event, like heavy lifting, or have you recently been sick with a cold or sore throat?"
+---
 
 # Logic:
 - IF response contains (**lifting** OR **heavy** OR **bulge** OR **pop** OR **strained**): GOTO node_id **Hernia_Result**

@@ -2,7 +2,12 @@
 """
 Load clinical state-machine nodes from `nodes/<node_id>.md`.
 
-Intended for tooling (e.g. an LLM `execute_node` handler) and quick CLI checks.
+Each node file starts with optional `---` front matter:
+
+  kind: question | result
+  patient: "Text shown in the terminal"
+
+The remainder is markdown (typically a `# Logic:` section with `GOTO node_id **Id**` lines).
 """
 
 from __future__ import annotations
@@ -29,35 +34,62 @@ def _strip_wrapping_quotes(raw: str) -> str:
     return s
 
 
+def split_node_document(text: str) -> tuple[dict[str, str], str]:
+    """
+    Split `---` YAML-style front matter from the rest of the file.
+    Returns (metadata dict with lowercased keys, body markdown).
+    If there is no leading `---` block, returns ({}, full text).
+    """
+    text = text.lstrip("\ufeff")
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, text
+
+    meta: dict[str, str] = {}
+    i = 1
+    while i < len(lines) and lines[i].strip() != "---":
+        raw = lines[i].strip()
+        if raw and not raw.startswith("#") and ":" in raw:
+            key, _, val = raw.partition(":")
+            k = key.strip().lower()
+            meta[k] = _strip_wrapping_quotes(val.strip())
+        i += 1
+
+    if i >= len(lines):
+        return {}, text
+
+    body = "\n".join(lines[i + 1 :])
+    return meta, body
+
+
+def node_logic_body(md: str) -> str:
+    """Body after front matter (or whole file if no front matter). Used for GOTO parsing."""
+    meta, body = split_node_document(md)
+    return body if meta else md
+
+
 def parse_node_display(md: str) -> tuple[str, str] | None:
     """
-    First patient-visible line from a node: (#) Question: … or (#) Result: …
-    Returns (\"Question\"|\"Result\", text) or None.
+    Patient-visible line from node front matter:
+      kind: question | result
+      patient: "text shown in the terminal"
+    Returns (\"Question\"|\"Result\", text) or None if invalid.
     """
-    patterns: list[tuple[str, str]] = [
-        (r"^#\s*Question:\s*(.+)$", "Question"),
-        (r"^Question:\s*(.+)$", "Question"),
-        (r"^#\s*Result:\s*(.+)$", "Result"),
-        (r"^Result:\s*(.+)$", "Result"),
-    ]
-    for rx, label in patterns:
-        m = re.search(rx, md, re.MULTILINE)
-        if m:
-            return label, _strip_wrapping_quotes(m.group(1))
-    return None
-
-
-def extract_question_from_markdown(md: str) -> str:
-    """Backward-compatible: Question text only, or Result text if no Question (terminal nodes)."""
-    p = parse_node_display(md)
-    return p[1] if p else ""
+    meta, _ = split_node_document(md)
+    kind = (meta.get("kind") or "").lower().strip()
+    patient = (meta.get("patient") or "").strip()
+    if kind not in ("question", "result") or not patient:
+        return None
+    label = "Question" if kind == "question" else "Result"
+    return label, patient
 
 
 def extract_branch_target_node_ids(md: str) -> list[str]:
-    """Ordered unique node ids appearing as `GOTO node_id **Id**` in the markdown."""
+    """Ordered unique node ids appearing as `GOTO node_id **Id**` in the Logic body."""
+    body = node_logic_body(md)
     seen: set[str] = set()
     out: list[str] = []
-    for m in GOTO_NODE_PATTERN.finditer(md):
+    for m in GOTO_NODE_PATTERN.finditer(body):
         nid = m.group(1)
         if NODE_ID_PATTERN.fullmatch(nid) and nid not in seen:
             seen.add(nid)

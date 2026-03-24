@@ -1,6 +1,7 @@
-# State: Appendagitis_Result
-
-# Result: "Clinical suspicion: Epiploic Appendagitis due to localized point tenderness without systemic illness."
+---
+kind: result
+patient: "Clinical suspicion: Epiploic Appendagitis due to localized point tenderness without systemic illness."
+---
 
 # Logic:
 - Terminal node — no transitions.

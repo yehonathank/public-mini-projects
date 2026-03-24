@@ -1,6 +1,7 @@
-# State: LRQ_Step_1
-
-# Question: "Did the pain start at your belly button and move down, or did it start in the lower right?"
+---
+kind: question
+patient: "Did the pain start at your belly button and move down, or did it start in the lower right?"
+---
 
 # Logic:
 - IF response contains (**belly button** OR **navel** OR **umbilical** OR **moved** OR **migration** OR **migrating**): GOTO node_id **Appendicitis_Result**
