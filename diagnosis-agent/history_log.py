@@ -61,6 +61,19 @@ class SessionHistory:
             "---\n\n"
         )
 
+    def ehr_loaded(self, relative_path: str, host_summary: str, full_record_json: str) -> None:
+        self._append(
+            "## Synthetic EHR (session)\n\n"
+            f"- **File:** `{relative_path}`\n"
+            "- **Model access:** chart slices **only** via `check_chart` when node Logic requires it "
+            "(not pre-loaded into routing prompts).\n"
+            "- **Host digest** (deterministic; audit / pre-display redirect only — not sent to the model):\n\n"
+            f"{_fence('markdown', host_summary)}"
+            "#### Full record (JSON)\n\n"
+            f"{_fence('json', full_record_json)}"
+            "---\n\n",
+        )
+
     def display_to_patient(self, node_id: str, label: str, text: str) -> None:
         """What the host printed (from node front matter), not from the LLM."""
         self._display_seq += 1
@@ -71,6 +84,17 @@ class SessionHistory:
             f"- **Text:** {json.dumps(text)}\n\n"
             "_Printed by Python from `nodes/{node_id}.md`; the LLM does not author this line._\n\n"
             "---\n\n"
+        )
+
+    def host_pre_display_ehr_redirect(self, *, from_node: str, to_node: str, when: str) -> None:
+        """Logged when the host skips a node's patient line because `ehr_auto_when` matched the chart."""
+        self._append(
+            "## Host EHR pre-display redirect\n\n"
+            f"- **Skipped displaying:** `{from_node}`\n"
+            f"- **Matched:** `ehr_auto_when: {when}`\n"
+            f"- **Next node (no question shown for skipped node):** `{to_node}`\n\n"
+            "_Deterministic host evaluation before `Display`; avoids redundant questions when the chart already implies the branch._\n\n"
+            "---\n\n",
         )
 
     def routing(
@@ -87,6 +111,8 @@ class SessionHistory:
         chosen_node_id: str,
         note: str = "",
         assistant_message_json: str | None = None,
+        ehr_prefetch_markdown: str | None = None,
+        chart_mining_trace: str | None = None,
     ) -> None:
         self._routing_seq += 1
         self._append(
@@ -99,10 +125,25 @@ class SessionHistory:
             f"- **`current_node_id`:** `{current_node_id}`\n"
             f"- **Chief complaint (repeated for model):** {json.dumps(chief_complaint)}\n"
             f"- **Allowed `node_id` values (enum):** {json.dumps(allowed_node_ids)}\n\n"
+        )
+        if ehr_prefetch_markdown:
+            self._append(
+                "#### EHR — host prefetch for this node (`ehr_prefetch`)\n\n"
+                f"{_fence('markdown', ehr_prefetch_markdown)}"
+            )
+        self._append(
             "#### Full current node file (as sent to the model)\n\n"
             f"{_fence('markdown', node_markdown_full)}"
-            "### Model output (tool)\n\n"
-            f"- **Chat Completions API called:** {'yes' if api_called else 'no (single branch — skipped)'}\n"
+        )
+        if chart_mining_trace:
+            self._append(
+                "### Chart-mining phase (`check_chart` only)\n\n"
+                "_Optional rounds before routing; each round is one Chat Completions call with `tool_choice=auto`._\n\n"
+                f"{chart_mining_trace}\n"
+            )
+        self._append(
+            "### Routing phase (`choose_next_node`)\n\n"
+            f"- **Chat Completions API called (routing):** {'yes' if api_called else 'no (single branch — skipped)'}\n"
             f"- **Expected tool name (schema):** `{tool_name}`\n"
         )
         if assistant_message_json is not None:

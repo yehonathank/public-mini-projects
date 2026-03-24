@@ -1,0 +1,11 @@
+{
+  "patient_id": "YLK-2026",
+  "demographics": { "age": 28, "biological_sex": "Female" },
+  "past_medical_history": ["Appendectomy (2018)", "IBS"],
+  "medications": ["Oral Contraceptive", "Multivitamin"],
+  "allergies": ["Penicillin (rash)"],
+  "vitals": { "bp_mmHg": "112/72", "hr": 84, "temp_C": 37.0, "spo2_pct": 99 },
+  "recent_encounters": [
+    { "date": "2026-03-10", "reason": "Sore throat", "diagnosis": "Viral Pharyngitis" }
+  ]
+}

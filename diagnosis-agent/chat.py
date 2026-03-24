@@ -3,8 +3,13 @@
 Clinical router chat — host-driven flow:
 
 - Prints each Question / Result from `nodes/*.md` locally (no LLM).
-- After each patient reply, one API call forces `choose_next_node` with an enum of
-  targets parsed from `GOTO node_id **Id**` in the current node's Logic (cannot skip ahead).
+- Loads synthetic EHR from `ehr/ehr_patient_1.json` on the host for `check_chart` and optional
+  host-only pre-display redirects; the model sees chart slices **only** when it calls `check_chart`
+  per node Logic (**Pre-check** / **IF EHR**).
+- Before printing a node's question, the host may **skip the display** and jump per
+  `ehr_auto_goto` / `ehr_auto_when` when the chart matches (no LLM — runs before patient sees text).
+- After each patient reply: optional chart-mining phase (`check_chart`, traceable), then a forced
+  `choose_next_node` call with an enum from `GOTO node_id **Id**` in the current node's Logic.
 - Each process replaces `history/history.md` (see `history_log.py`).
 
   pip install -r requirements.txt
@@ -23,20 +28,54 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from ehr_reader import (
+    CHART_CATEGORIES,
+    EHR_DEFAULT_PATH,
+    ehr_predicate_holds,
+    format_slice_json,
+    host_ehr_summary,
+    load_ehr,
+)
 from history_log import HISTORY_FILE, SessionHistory, reset_history_dir
-from router import allowed_next_node_ids, load_node, parse_node_display
+from router import (
+    allowed_next_node_ids,
+    load_node,
+    meta_ehr_auto_redirect,
+    parse_node_display,
+    split_node_document,
+)
 
 DEFAULT_MODEL = "gpt-5.1"
 
-CHOOSER_SYSTEM = """You are a deterministic branch selector for a scripted clinical router.
+MAX_CHART_ROUNDS = 8
+MAX_EHR_PRE_DISPLAY_HOPS = 32
 
-You must call the tool `choose_next_node` exactly once. Pick the single `node_id` from the allowed enum that best matches the patient's latest answer according to the Logic section of the current node markdown.
+_CHART_CATS_INLINE = ", ".join(f"`{c}`" for c in CHART_CATEGORIES)
+
+
+def _chooser_system_for_chief(chief: str) -> str:
+    """Routing system prompt: no EHR text — chart only via `check_chart` in the same turn."""
+    cats = _CHART_CATS_INLINE
+    return f"""You are a deterministic branch selector for a scripted clinical CDS router.
+
+## Chart access (on demand only)
+The synthetic EHR is **not** pre-loaded into this system message. Chart data appears **only** from `check_chart` tool results in the chart-mining phase of this turn (see conversation messages above that phase). When node **Logic** includes **Pre-check**, **pull the chart**, or **IF EHR** with facts you do not yet have in this thread, call `check_chart` with the right `category` before you finish chart-mining. If no Logic line requires chart data for this routing decision, you may end chart-mining without tool calls.
+
+## Chart-mining tool (first API phase only)
+You may call `check_chart` with `category` one of: {cats}
+Each call returns one JSON slice (trace logged). Do not assume categories you have not retrieved.
+When you need no further chart slices, reply with **no** `tool_calls` (plain assistant message, content may be brief).
+
+## Routing tool (second API phase only)
+You must call `choose_next_node` exactly once. Pick the single `node_id` from the allowed enum that best matches the patient's latest answer **and** the Logic section, including any **IF EHR** branches **only as supported by `check_chart` results already in this turn's messages** (or by explicit patient text when Logic allows).
 
 Rules:
 - Use the chief complaint from intake when Logic refers to it.
-- If the answer fits no branch clearly, prefer re-asking: choose the current node id only if it appears in the enum and matches a "vague / re-ask" branch; otherwise choose the safest explicit branch.
+- When Logic says **IF EHR** …, use chart slices from this turn's `check_chart` tool results; if the Logic required a Pre-check you did not run, call `check_chart` in chart-mining first (you cannot invent chart facts).
+- When the patient gives a **specific** story (injury, mechanism, timeline) that fits an explicit Logic branch (**falls/trauma**, **lifting**, **viral symptoms**, etc.), choose that branch — do **not** pick the current node id just to re-ask the same screen question.
+- If the answer fits no branch clearly, prefer re-asking: choose the current node id only if it appears in the enum and the reply is **genuinely vague** (e.g. "I don't know", "maybe", single word with no clear mapping); otherwise choose the safest explicit continuation/result branch the Logic allows.
 - Do not invent node ids; only use the enum provided by the tool schema.
-- Do not output medical advice as plain text — only the tool call.
+- Do not output medical advice as plain text in lieu of the required tool in the routing phase.
 
 Chief complaint at intake: {chief!r}"""
 
@@ -102,6 +141,57 @@ def _choose_next_tools(allowed: list[str]) -> list[dict[str, Any]]:
     ]
 
 
+def _check_chart_tool_def() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "check_chart",
+            "description": "Return one slice of the synthetic EHR JSON for traceable chart-mining.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Top-level EHR key.",
+                        "enum": CHART_CATEGORIES,
+                    }
+                },
+                "required": ["category"],
+            },
+        },
+    }
+
+
+def _sanitize_chat_text(s: str) -> str:
+    """Strip characters that can break API JSON or model parsers (e.g. NUL)."""
+    return s.replace("\x00", "") if s else s
+
+
+def _openai_assistant_dict(msg: Any) -> dict[str, Any]:
+    """Serialize assistant message + tool_calls for the next Chat Completions `messages` turn."""
+    raw = getattr(msg, "content", None)
+    content = "" if raw is None else _sanitize_chat_text(str(raw))
+    d: dict[str, Any] = {"role": getattr(msg, "role", "assistant") or "assistant", "content": content}
+    tcs = getattr(msg, "tool_calls", None) or []
+    if not tcs:
+        return d
+    tool_calls: list[dict[str, Any]] = []
+    for tc in tcs:
+        fn = tc.function
+        tool_calls.append(
+            {
+                "id": tc.id,
+                "type": getattr(tc, "type", None) or "function",
+                "function": {
+                    "name": fn.name,
+                    "arguments": fn.arguments or "{}",
+                },
+            }
+        )
+    d["tool_calls"] = tool_calls
+    return d
+
+
 def choose_next_node_llm(
     client: OpenAI,
     model: str,
@@ -111,9 +201,11 @@ def choose_next_node_llm(
     node_md: str,
     reply: str,
     allowed: list[str],
+    ehr: dict[str, Any],
     log: SessionHistory | None = None,
 ) -> str:
-    system_prompt = CHOOSER_SYSTEM.format(chief=chief)
+    reply = _sanitize_chat_text(reply)
+    system_prompt = _chooser_system_for_chief(chief)
 
     def _write_routing(
         *,
@@ -121,6 +213,7 @@ def choose_next_node_llm(
         chosen_node_id: str,
         note: str = "",
         assistant_message_json: str | None = None,
+        chart_mining_trace: str | None = None,
     ) -> None:
         if log is None:
             return
@@ -136,6 +229,8 @@ def choose_next_node_llm(
             chosen_node_id=chosen_node_id,
             note=note,
             assistant_message_json=assistant_message_json,
+            ehr_prefetch_markdown=None,
+            chart_mining_trace=chart_mining_trace,
         )
 
     if len(allowed) == 1:
@@ -144,46 +239,108 @@ def choose_next_node_llm(
             chosen_node_id=allowed[0],
             note="Only one legal branch; Chat Completions not invoked.",
             assistant_message_json=None,
+            chart_mining_trace=None,
         )
         return allowed[0]
 
-    tools = _choose_next_tools(allowed)
+    user_phase_a = (
+        f"### Current node_id\n`{current_id}`\n\n"
+        "### Node markdown (full)\n\n"
+        f"{node_md}\n\n"
+        "### Patient's latest answer (to the question on screen)\n\n"
+        f"{reply!r}\n\n"
+        "**Chart-mining phase:** Follow **Pre-check** / **pull the chart** / **IF EHR** in the node "
+        "Logic — call `check_chart` only when the Logic tells you to retrieve chart data you do not "
+        "already have in this thread. When done, reply with **no** tool_calls.\n"
+    )
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_phase_a},
+    ]
+
+    chart_trace_parts: list[str] = []
+    for round_idx in range(MAX_CHART_ROUNDS):
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=[_check_chart_tool_def()],
+            tool_choice="auto",
+        )
+        msg = resp.choices[0].message
+        chart_trace_parts.append(f"#### Chart phase — API round {round_idx + 1}\n\n")
+        chart_trace_parts.append("**Assistant `message`:**\n\n")
+        chart_trace_parts.append(f"```json\n{_assistant_message_to_log_json(msg)}\n```\n\n")
+        messages.append(_openai_assistant_dict(msg))
+
+        tcs = getattr(msg, "tool_calls", None) or []
+        if not tcs:
+            chart_trace_parts.append("_No tool calls; chart-mining complete._\n\n")
+            break
+
+        if not all(getattr(tc.function, "name", "") == "check_chart" for tc in tcs):
+            chart_trace_parts.append("_Unexpected tool in chart phase; host stopped chart-mining._\n\n")
+            break
+
+        for tc in tcs:
+            raw_args = tc.function.arguments or "{}"
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                body = json.dumps(
+                    {"error": "invalid_arguments_json", "raw": raw_args},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            else:
+                cat = (args.get("category") or "").strip()
+                body = format_slice_json(ehr, cat)
+            chart_trace_parts.append(
+                f"**`check_chart` tool result** (`tool_call_id={getattr(tc, 'id', '')}`):\n\n"
+                f"```json\n{body}\n```\n\n"
+            )
+            messages.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": _sanitize_chat_text(body)}
+            )
+    else:
+        chart_trace_parts.append(f"_Max chart rounds ({MAX_CHART_ROUNDS}) reached._\n\n")
+
+    chart_trace_md = "".join(chart_trace_parts)
+
+    messages.append(
         {
             "role": "user",
             "content": (
-                f"Current node_id: {current_id}\n\n"
-                f"--- node markdown ---\n{node_md}\n---\n\n"
-                f"Patient's latest answer (to the question on screen):\n{reply!r}\n\n"
-                "Call choose_next_node once with the matching node_id."
+                "**ROUTING_PHASE:** Call `choose_next_node` exactly once with the best `node_id` "
+                "from the allowed enum. Do not call `check_chart`."
             ),
-        },
-    ]
+        }
+    )
 
-    resp = client.chat.completions.create(
+    resp2 = client.chat.completions.create(
         model=model,
         messages=messages,
-        tools=tools,
+        tools=_choose_next_tools(allowed),
         tool_choice={"type": "function", "function": {"name": "choose_next_node"}},
     )
-    msg = resp.choices[0].message
-    assistant_json = _assistant_message_to_log_json(msg)
-    tcs = getattr(msg, "tool_calls", None) or []
-    extra = (msg.content or "").strip()
+    msg2 = resp2.choices[0].message
+    assistant_json = _assistant_message_to_log_json(msg2)
+    tcs2 = getattr(msg2, "tool_calls", None) or []
+    extra = (msg2.content or "").strip()
     extra_note = f" Assistant message text (not used for routing): {json.dumps(extra)}" if extra else ""
 
-    if not tcs:
+    if not tcs2:
         print("(model): no tool call; falling back to first allowed branch.", file=sys.stderr)
         _write_routing(
             api_called=True,
             chosen_node_id=allowed[0],
             note="Model returned no tool_calls; host used first allowed id." + extra_note,
             assistant_message_json=assistant_json,
+            chart_mining_trace=chart_trace_md,
         )
         return allowed[0]
 
-    raw = tcs[0].function.arguments or "{}"
+    raw = tcs2[0].function.arguments or "{}"
     try:
         args = json.loads(raw)
     except json.JSONDecodeError:
@@ -193,6 +350,7 @@ def choose_next_node_llm(
             chosen_node_id=allowed[0],
             note="Invalid JSON in tool arguments; host fell back to first allowed id." + extra_note,
             assistant_message_json=assistant_json,
+            chart_mining_trace=chart_trace_md,
         )
         return allowed[0]
 
@@ -204,6 +362,7 @@ def choose_next_node_llm(
             chosen_node_id=allowed[0],
             note=f"Model chose {choice!r} (not in enum); host fell back to first allowed id." + extra_note,
             assistant_message_json=assistant_json,
+            chart_mining_trace=chart_trace_md,
         )
         return allowed[0]
 
@@ -212,6 +371,7 @@ def choose_next_node_llm(
         chosen_node_id=choice,
         note=("Tool arguments accepted as-is." + extra_note).strip(),
         assistant_message_json=assistant_json,
+        chart_mining_trace=chart_trace_md,
     )
     return choice
 
@@ -232,6 +392,22 @@ def _read_line_nonempty(prompt: str, *, allow_quit: bool = True) -> str | None:
 
 
 def run_session(client: OpenAI, model: str, chief: str, log: SessionHistory) -> None:
+    pkg = Path(__file__).resolve().parent
+    ehr_rel = str(EHR_DEFAULT_PATH.relative_to(pkg))
+    try:
+        ehr: dict[str, Any] = load_ehr()
+    except FileNotFoundError:
+        ehr = {}
+        print(
+            f"Warning: EHR file missing ({ehr_rel}); routing runs with empty chart.",
+            file=sys.stderr,
+        )
+    log.ehr_loaded(
+        ehr_rel,
+        host_ehr_summary(ehr),
+        json.dumps(ehr, ensure_ascii=False, indent=2),
+    )
+
     current = "skills"
     print(f"Patient: {chief}\n")
 
@@ -240,6 +416,36 @@ def run_session(client: OpenAI, model: str, chief: str, log: SessionHistory) -> 
             md = load_node(current)
         except (ValueError, FileNotFoundError) as e:
             print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        hops = 0
+        while hops < MAX_EHR_PRE_DISPLAY_HOPS:
+            hops += 1
+            meta, _ = split_node_document(md)
+            goto_id, when = meta_ehr_auto_redirect(meta)
+            if goto_id and when and ehr_predicate_holds(when, ehr):
+                try:
+                    load_node(goto_id)
+                except (ValueError, FileNotFoundError) as e:
+                    print(
+                        f"Warning: invalid ehr_auto_goto {goto_id!r} from node {current!r}: {e}",
+                        file=sys.stderr,
+                    )
+                    break
+                log.host_pre_display_ehr_redirect(from_node=current, to_node=goto_id, when=when)
+                current = goto_id
+                try:
+                    md = load_node(current)
+                except (ValueError, FileNotFoundError) as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    sys.exit(1)
+                continue
+            break
+        else:
+            print(
+                "Error: exceeded EHR pre-display redirect hop limit (misconfigured graph?).",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         disp = parse_node_display(md)
@@ -280,6 +486,7 @@ def run_session(client: OpenAI, model: str, chief: str, log: SessionHistory) -> 
                 node_md=md,
                 reply=line,
                 allowed=allowed,
+                ehr=ehr,
                 log=log,
             )
         except Exception as e:

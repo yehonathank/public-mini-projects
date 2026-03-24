@@ -7,6 +7,15 @@ Each node file starts with optional `---` front matter:
   kind: question | result
   patient: "Text shown in the terminal"
 
+Optional front-matter keys:
+
+  ehr_auto_goto: LRQ_Step_2
+  ehr_auto_when: appendectomy_in_pmh
+
+If `ehr_auto_when` is true for the session EHR, the host skips printing this node's `patient:` line
+and jumps to `ehr_auto_goto` before any LLM routing (chart-first). Predicate names are defined in
+`ehr_reader.EHR_AUTO_WHEN_PREDICATES` / `ehr_reader.ehr_predicate_holds`.
+
 The remainder is markdown (typically a `# Logic:` section with `GOTO node_id **Id**` lines).
 """
 
@@ -66,6 +75,15 @@ def node_logic_body(md: str) -> str:
     """Body after front matter (or whole file if no front matter). Used for GOTO parsing."""
     meta, body = split_node_document(md)
     return body if meta else md
+
+
+def meta_ehr_auto_redirect(meta: dict[str, str]) -> tuple[str | None, str | None]:
+    """Parse `ehr_auto_goto` / `ehr_auto_when` for host pre-display chart pruning."""
+    goto = (meta.get("ehr_auto_goto") or "").strip()
+    when = (meta.get("ehr_auto_when") or "").strip()
+    if not goto or not when:
+        return None, None
+    return goto, when
 
 
 def parse_node_display(md: str) -> tuple[str, str] | None:
