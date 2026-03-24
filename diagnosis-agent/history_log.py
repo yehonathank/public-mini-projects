@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -87,13 +88,14 @@ class SessionHistory:
         )
 
     def host_pre_display_ehr_redirect(self, *, from_node: str, to_node: str, when: str) -> None:
-        """Logged when the host skips a node's patient line because `ehr_auto_when` matched the chart."""
+        """Logged when the host skips a patient's question because `ehr_auto_when` matched the chart."""
         self._append(
             "## Host EHR pre-display redirect\n\n"
             f"- **Skipped displaying:** `{from_node}`\n"
             f"- **Matched:** `ehr_auto_when: {when}`\n"
             f"- **Next node (no question shown for skipped node):** `{to_node}`\n\n"
-            "_Deterministic host evaluation before `Display`; avoids redundant questions when the chart already implies the branch._\n\n"
+            "_**Not** a model `check_chart` call — Python evaluated the session EHR before printing the node. "
+            "See **Routing** sections below for model-initiated `check_chart` (EHR fetch tool)._ \n\n"
             "---\n\n",
         )
 
@@ -113,11 +115,35 @@ class SessionHistory:
         assistant_message_json: str | None = None,
         ehr_prefetch_markdown: str | None = None,
         chart_mining_trace: str | None = None,
+        check_chart_invocations: list[dict[str, Any]] | None = None,
     ) -> None:
         self._routing_seq += 1
         self._append(
             f"## Routing {self._routing_seq} — after patient reply\n\n"
             f"- **Patient said (`You:`):** {json.dumps(patient_line)}\n\n"
+        )
+        inv = check_chart_invocations or []
+        self._append("### Model EHR fetch tool (`check_chart`)\n\n")
+        if not inv:
+            self._append(
+                "- **Model invoked `check_chart` this turn:** **no** — chart-mining phase ended without "
+                "any `check_chart` tool calls (model replied with no `tool_calls`).\n\n"
+            )
+        else:
+            self._append(
+                f"- **Model invoked `check_chart` this turn:** **yes** — **{len(inv)}** call(s); "
+                "host executed each call and returned the JSON slice below in the chart-mining trace.\n\n"
+            )
+            for i, row in enumerate(inv, 1):
+                rnd = row.get("chart_phase_round", "?")
+                cat = row.get("category", "")
+                tid = row.get("tool_call_id", "")
+                self._append(
+                    f"{i}. **Chart-mining API round {rnd}** — model tool call **`check_chart`** — "
+                    f"`category`={json.dumps(cat)} — `tool_call_id`={json.dumps(tid)}\n"
+                )
+            self._append("\n")
+        self._append(
             "### Context sent to the model\n\n"
             "#### System message\n\n"
             f"{_fence('text', system_prompt)}"
@@ -138,7 +164,8 @@ class SessionHistory:
         if chart_mining_trace:
             self._append(
                 "### Chart-mining phase (`check_chart` only)\n\n"
-                "_Optional rounds before routing; each round is one Chat Completions call with `tool_choice=auto`._\n\n"
+                "_Each round is one Chat Completions call with `tool_choice=auto`. "
+                "See **Model EHR fetch tool (`check_chart`)** above for a numbered list of model-initiated tool calls._\n\n"
                 f"{chart_mining_trace}\n"
             )
         self._append(

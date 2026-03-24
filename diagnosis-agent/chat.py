@@ -214,6 +214,7 @@ def choose_next_node_llm(
         note: str = "",
         assistant_message_json: str | None = None,
         chart_mining_trace: str | None = None,
+        check_chart_invocations: list[dict[str, Any]] | None = None,
     ) -> None:
         if log is None:
             return
@@ -231,6 +232,7 @@ def choose_next_node_llm(
             assistant_message_json=assistant_message_json,
             ehr_prefetch_markdown=None,
             chart_mining_trace=chart_mining_trace,
+            check_chart_invocations=check_chart_invocations,
         )
 
     if len(allowed) == 1:
@@ -240,6 +242,7 @@ def choose_next_node_llm(
             note="Only one legal branch; Chat Completions not invoked.",
             assistant_message_json=None,
             chart_mining_trace=None,
+            check_chart_invocations=[],
         )
         return allowed[0]
 
@@ -260,6 +263,7 @@ def choose_next_node_llm(
     ]
 
     chart_trace_parts: list[str] = []
+    check_chart_invocations: list[dict[str, Any]] = []
     for round_idx in range(MAX_CHART_ROUNDS):
         resp = client.chat.completions.create(
             model=model,
@@ -284,9 +288,11 @@ def choose_next_node_llm(
 
         for tc in tcs:
             raw_args = tc.function.arguments or "{}"
+            tc_id = getattr(tc, "id", "") or ""
             try:
                 args = json.loads(raw_args)
             except json.JSONDecodeError:
+                cat_label = "(invalid JSON in tool arguments)"
                 body = json.dumps(
                     {"error": "invalid_arguments_json", "raw": raw_args},
                     ensure_ascii=False,
@@ -294,9 +300,18 @@ def choose_next_node_llm(
                 )
             else:
                 cat = (args.get("category") or "").strip()
+                cat_label = cat if cat else "(missing category)"
                 body = format_slice_json(ehr, cat)
+            check_chart_invocations.append(
+                {
+                    "chart_phase_round": round_idx + 1,
+                    "category": cat_label,
+                    "tool_call_id": tc_id,
+                }
+            )
             chart_trace_parts.append(
-                f"**`check_chart` tool result** (`tool_call_id={getattr(tc, 'id', '')}`):\n\n"
+                "**Model invoked `check_chart`** — host tool result "
+                f"(`tool_call_id={tc_id}`, `category`={json.dumps(cat_label)}):\n\n"
                 f"```json\n{body}\n```\n\n"
             )
             messages.append(
@@ -337,6 +352,7 @@ def choose_next_node_llm(
             note="Model returned no tool_calls; host used first allowed id." + extra_note,
             assistant_message_json=assistant_json,
             chart_mining_trace=chart_trace_md,
+            check_chart_invocations=check_chart_invocations,
         )
         return allowed[0]
 
@@ -351,6 +367,7 @@ def choose_next_node_llm(
             note="Invalid JSON in tool arguments; host fell back to first allowed id." + extra_note,
             assistant_message_json=assistant_json,
             chart_mining_trace=chart_trace_md,
+            check_chart_invocations=check_chart_invocations,
         )
         return allowed[0]
 
@@ -363,6 +380,7 @@ def choose_next_node_llm(
             note=f"Model chose {choice!r} (not in enum); host fell back to first allowed id." + extra_note,
             assistant_message_json=assistant_json,
             chart_mining_trace=chart_trace_md,
+            check_chart_invocations=check_chart_invocations,
         )
         return allowed[0]
 
@@ -372,6 +390,7 @@ def choose_next_node_llm(
         note=("Tool arguments accepted as-is." + extra_note).strip(),
         assistant_message_json=assistant_json,
         chart_mining_trace=chart_trace_md,
+        check_chart_invocations=check_chart_invocations,
     )
     return choice
 
